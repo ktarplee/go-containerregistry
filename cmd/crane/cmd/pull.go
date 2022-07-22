@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/cobra"
 )
 
@@ -101,7 +102,8 @@ func NewCmdPull(options *[]crane.Option) *cobra.Command {
 							return err
 						}
 						opts = append(opts, layout.WithAnnotations(map[string]string{
-							"org.opencontainers.image.ref.name": parsed.Name(),
+							ocispec.AnnotationRefName: parsed.Name(),
+							"original":                ref,
 						}))
 					}
 					if err = p.AppendImage(img, opts...); err != nil {
@@ -117,7 +119,8 @@ func NewCmdPull(options *[]crane.Option) *cobra.Command {
 							return err
 						}
 						opts = append(opts, layout.WithAnnotations(map[string]string{
-							"org.opencontainers.image.ref.name": parsed.Name(),
+							ocispec.AnnotationRefName: parsed.Name(),
+							"original":                ref,
 						}))
 					}
 					if err := p.AppendIndex(idx, opts...); err != nil {
