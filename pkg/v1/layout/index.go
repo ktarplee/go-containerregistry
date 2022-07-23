@@ -59,6 +59,27 @@ func (l Path) ImageIndex() (v1.ImageIndex, error) {
 	return idx, nil
 }
 
+// ImageIndexFromPathWithIndex returns a ImageIndex at path but replace (in memory only) the IndexManifest
+func ImageIndexFromPathWithIndex(path string, indexManifest v1.IndexManifest) (v1.ImageIndex, error) {
+	lp, err := FromPath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	rawIndex, err := json.Marshal(indexManifest)
+	if err != nil {
+		return nil, err
+	}
+
+	idx := &layoutIndex{
+		mediaType: types.OCIImageIndex,
+		path:      lp,
+		rawIndex:  rawIndex,
+	}
+
+	return idx, nil
+}
+
 func (i *layoutIndex) MediaType() (types.MediaType, error) {
 	return i.mediaType, nil
 }

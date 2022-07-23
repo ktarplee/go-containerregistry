@@ -18,32 +18,34 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/google/go-containerregistry/pkg/v1/match"
 	"github.com/google/go-containerregistry/pkg/v1/partial"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // NewCmdPush creates a new cobra.Command for the push subcommand.
 func NewCmdPush(options *[]crane.Option) *cobra.Command {
 	index := false
 	imageRefs := ""
+	im := indexMatchers{}
+
 	cmd := &cobra.Command{
 		Use:   "push PATH IMAGE",
 		Short: "Push local image contents to a remote registry",
-		Long:  `If the PATH is a directory, it will be read as an OCI image layout. Otherwise, PATH is assumed to be a docker-style tarball.`,
-		Args:  cobra.ExactArgs(2),
+		Long: `If the PATH is a directory, it will be read as an OCI image layout. Otherwise, PATH is assumed to be a docker-style tarball.
+		
+		All match options must apply for an image to be included.`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			path, tag := args[0], args[1]
-
-			img, err := loadImage(path, index)
-			if err != nil {
-				return err
-			}
 
 			o := crane.GetOptions(*options...)
 			ref, err := name.ParseReference(tag, o.Name...)
@@ -51,39 +53,25 @@ func NewCmdPush(options *[]crane.Option) *cobra.Command {
 				return err
 			}
 
+			matchers, err := im.GetMatchers()
+			if err != nil {
+				return err
+			}
+
 			// If the destination contains a digest then we should only push the manifest with that digest
 			if digestRef, ok := ref.(name.Digest); ok {
+				// add a selector to only select the given digest
 				// convert the string to a v1.Hash
 				hashRef, err := v1.NewHash(digestRef.DigestStr())
 				if err != nil {
 					return err
 				}
+				matchers = append(matchers, match.Digests(hashRef))
+			}
 
-				switch t := img.(type) {
-				case v1.Image:
-					// ensure that the digest matches
-					hh, err := t.Digest()
-					if err != nil {
-						return err
-					}
-					if hashRef != hh {
-						return fmt.Errorf("requested manifest not present in index, missing %s", hh)
-					}
-				case v1.ImageIndex:
-					// Get a specific image
-					// Try ImageIndex first
-					img, err = t.ImageIndex(hashRef)
-					if err == nil {
-						break
-					}
-					// Fallback to plain Image
-					img, err = t.Image(hashRef)
-					if err != nil {
-						return err
-					}
-					// TODO there is no good way to handle the errors here since they are untyped and they contain information we do not know (the media type of the match).
-					//  I wish the findDescriptor() function was exposed or there was a more tolerant call to "Image" that did not care about Manifest vs Manifest List.
-				}
+			img, err := loadImage(path, index, matchers)
+			if err != nil {
+				return err
 			}
 
 			var h v1.Hash
@@ -116,12 +104,14 @@ func NewCmdPush(options *[]crane.Option) *cobra.Command {
 			return nil
 		},
 	}
+
 	cmd.Flags().BoolVar(&index, "index", false, "push a collection of images as a single index, currently required if PATH contains multiple images")
 	cmd.Flags().StringVar(&imageRefs, "image-refs", "", "path to file where a list of the published image references will be written")
+	cmd.Flags().AddFlagSet(im.GetFlagSet())
 	return cmd
 }
 
-func loadImage(path string, index bool) (partial.WithRawManifest, error) {
+func loadImage(path string, index bool, matchers []match.Matcher) (partial.WithRawManifest, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -140,14 +130,29 @@ func loadImage(path string, index bool) (partial.WithRawManifest, error) {
 		return nil, fmt.Errorf("loading %s as OCI layout: %w", path, err)
 	}
 
-	if index {
-		return l, nil
-	}
-
+	// apply selectors to filter images
 	m, err := l.IndexManifest()
 	if err != nil {
 		return nil, err
 	}
+
+	filteredManifests := make([]v1.Descriptor, 0, len(m.Manifests))
+	for _, d := range m.Manifests {
+		if matchesAll(d, matchers) {
+			filteredManifests = append(filteredManifests, d)
+		}
+	}
+	m.Manifests = filteredManifests
+	// TODO serialize m and set it to l
+	l, err = layout.ImageIndexFromPathWithIndex(path, *m)
+	if err != nil {
+		return nil, err
+	}
+
+	if index {
+		return l, nil
+	}
+
 	if len(m.Manifests) != 1 {
 		return nil, fmt.Errorf("layout contains %d entries, consider --index", len(m.Manifests))
 	}
@@ -160,4 +165,56 @@ func loadImage(path string, index bool) (partial.WithRawManifest, error) {
 	}
 
 	return nil, fmt.Errorf("layout contains non-image (mediaType: %q), consider --index", desc.MediaType)
+}
+
+type indexMatchers struct {
+	name        string
+	digest      string
+	annotations []string
+	// platform
+	// mediaType
+}
+
+func (im *indexMatchers) GetFlagSet() *pflag.FlagSet {
+	flags := &pflag.FlagSet{}
+	flags.StringVar(&im.digest, "match-digest", "", `digest of image to select.  Only applicable to OCI format.`)
+	flags.StringVar(&im.name, "match-name", "", `name of image to select (the one with "org.opencontainers.image.ref.name" annotation that matches).  Only applicable to OCI format.`)
+	flags.StringArrayVar(&im.annotations, "match-annotation", nil, `selectors to use to filter the image list based on annotations.  Only applicable to OCI format.
+	To filter by original image name use "original=busybox".`)
+	return flags
+}
+
+func (im *indexMatchers) GetMatchers() ([]match.Matcher, error) {
+	matchers := make([]match.Matcher, 0, len(im.annotations))
+	if im.digest != "" {
+		// convert the string to a v1.Hash
+		hashRef, err := v1.NewHash(im.digest)
+		if err != nil {
+			return nil, err
+		}
+		matchers = append(matchers, match.Digests(hashRef))
+	}
+
+	if im.name != "" {
+		matchers = append(matchers, match.Name(im.name))
+	}
+
+	// convert matchAnnotations into matchers
+	for _, s := range im.annotations {
+		parts := strings.SplitN(s, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf(`match-annotation "%s" is missing a "=" sign`, s)
+		}
+		matchers = append(matchers, match.Annotation(parts[0], parts[1]))
+	}
+	return matchers, nil
+}
+
+func matchesAll(desc v1.Descriptor, matchers []match.Matcher) bool {
+	for _, matcher := range matchers {
+		if !matcher(desc) {
+			return false
+		}
+	}
+	return true
 }
