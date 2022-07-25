@@ -112,6 +112,7 @@ func New(use, short string, options []crane.Option) *cobra.Command {
 		NewCmdRebase(&options),
 		NewCmdTag(&options),
 		NewCmdValidate(&options),
+		NewCmdName(&options),
 		NewCmdVersion(),
 	}
 
