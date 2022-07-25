@@ -15,6 +15,8 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
@@ -41,9 +43,9 @@ func NewCmdName(options *[]crane.Option) *cobra.Command {
 					return err
 				}
 				// name
-				cmd.Println(ref.Context().String() + "@" + dgst)
+				fmt.Println(ref.Context().String() + "@" + dgst)
 			} else {
-				cmd.Println(ref.Name())
+				fmt.Println(ref.Name())
 			}
 			return nil
 		},
